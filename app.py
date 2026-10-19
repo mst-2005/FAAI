@@ -1,5 +1,7 @@
 import streamlit as st
-import time
+import os
+from google import genai
+from google.genai import types
 
 # Page Configuration
 st.set_page_config(
@@ -8,7 +10,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS styling for a cleaner look
+# Custom CSS styling
 st.markdown("""
     <style>
     .main {
@@ -26,19 +28,24 @@ st.markdown("""
         border-radius: 10px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
         margin-bottom: 15px;
-        word-wrap: break-word;
-        overflow-wrap: break-word;
-        white-space: pre-wrap;
     }
     </style>
 """, unsafe_allow_html=True)
 
 # App Header
-st.title("📚 Agentic Study Assistant")
+st.title("📚 Agentic Study Assistant (Powered by Gemini)")
 st.markdown("Transform your dense lecture notes into active-recall flashcards and practice quizzes using an automated multi-agent pipeline.")
 
-# Sidebar for Agent Configuration
-st.sidebar.header("🤖 Agent Configuration")
+# Sidebar for Configuration & API Key
+st.sidebar.header("🤖 Agent & API Configuration")
+
+# Secure API Key Input
+api_key_input = st.sidebar.text_input("Enter Gemini API Key", type="password", help="Get your key from Google AI Studio")
+
+# If user provided a key via sidebar, set it in environment or use it directly
+if api_key_input:
+    os.environ["GEMINI_API_KEY"] = api_key_input
+
 selected_agents = st.sidebar.multiselect(
     "Active Agents in Pipeline",
     ["Planner Agent", "Executor (Content) Agent", "Critic Agent"],
@@ -55,112 +62,97 @@ notes_input = st.text_area(
     placeholder="Example: Photosynthesis is the process used by plants to convert light energy into chemical energy..."
 )
 
-# Simulated Agentic Pipeline Functions (Easily replaceable with real LLM / LangChain calls)
-def run_planner_agent(text):
-    time.sleep(1)
-    # Splits text into thematic chunks
-    sentences = [s.strip() for s in text.split('.') if len(s.strip()) > 10]
-    chunks = sentences if sentences else [text.strip()]
-    return chunks
+# Real Agentic Pipeline Functions using Gemini API
+def run_planner_agent(client, text):
+    # Planner Agent: Chunks and categorizes text
+    prompt = f"Analyze the following study notes and break them down into {num_questions} core thematic sub-topics or conceptual sections:\n\n{text}"
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt,
+    )
+    return response.text
 
-def run_executor_agent(chunks, count):
-    time.sleep(1.5)
-    flashcards = []
-    quizzes = []
-    effective_chunks = chunks if len(chunks) >= count else (chunks * ((count // len(chunks)) + 1))
-    for i, chunk in enumerate(effective_chunks[:count]):
-        flashcards.append({
-            "front": f"Core Concept {i+1} from notes",
-            "back": f"Summary: {chunk}"
-        })
-        quizzes.append({
-            "question": f"Based on the notes, which statement best aligns with: '{chunk}'",
-            "options": [
-                "It describes the primary foundational mechanism.",
-                "It is an unrelated historical footnote.",
-                "It contradicts the core premise.",
-                "It applies only under rare edge cases."
-            ],
-            "answer": "It describes the primary foundational mechanism."
-        })
-    return flashcards, quizzes
+def run_executor_agent(client, plan_text):
+    # Executor Agent: Generates Flashcards and Quizzes based on the plan
+    prompt = f"""
+    Based on the following sub-topics/plan, generate:
+    1. {num_questions} Flashcards (Front/Question and Back/Answer format).
+    2. {num_questions} Multiple Choice Questions (MCQs) with 4 options each and the correct answer explicitly marked.
+    
+    Plan / Context:
+    {plan_text}
+    
+    Format the output clearly separating Flashcards and Quizzes so it can be parsed easily.
+    """
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt,
+    )
+    return response.text
 
-def run_critic_agent(flashcards, quizzes):
-    time.sleep(1)
-    # Validates and cleans output formatting
-    validated_flashcards = [fc for fc in flashcards if len(fc['back']) > 10]
-    validated_quizzes = [q for q in quizzes if len(q['options']) == 4]
-    return validated_flashcards, validated_quizzes
+def run_critic_agent(client, raw_content):
+    # Critic Agent: Reviews and validates output quality
+    prompt = f"""
+    Review the following generated study materials. Clean up any formatting errors, ensure all quiz options are accurate, and format the output neatly into JSON-like or clearly structured blocks for display:
+    
+    {raw_content}
+    """
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt,
+    )
+    return response.text
 
 # Execution Trigger Button
 if st.button("🚀 Run Agentic Workflow"):
-    if not notes_input.strip():
+    # Check if API key is available
+    active_api_key = os.environ.get("GEMINI_API_KEY")
+    if not active_api_key:
+        st.error("⚠️ Please enter your Gemini API key in the sidebar to run the agents.")
+    elif not notes_input.strip():
         st.warning("Please paste some study notes before running the agents.")
     else:
-        # Progress status container to showcase agent collaboration
-        status_container = st.status("Agent Pipeline in Progress...", expanded=True)
-        
-        chunks = []
-        flashcards = []
-        quizzes = []
-
         try:
+            # Initialize the Gemini client using the modern google-genai SDK
+            client = genai.Client(api_key=active_api_key)
+            
+            # Progress status container to showcase agent collaboration
+            status_container = st.status("Agent Pipeline in Progress...", expanded=True)
+            
+            plan_result = ""
+            executor_result = ""
+            final_output = ""
+
             if "Planner Agent" in selected_agents:
                 status_container.write("🧠 **Planner Agent:** Analyzing notes and chunking text into core topics...")
-                chunks = run_planner_agent(notes_input)
+                plan_result = run_planner_agent(client, notes_input)
             else:
-                chunks = [notes_input]
+                plan_result = notes_input
 
             if "Executor (Content) Agent" in selected_agents:
                 status_container.write("⚡ **Executor Agent:** Generating structured flashcards and MCQs...")
-                flashcards, quizzes = run_executor_agent(chunks, num_questions)
+                executor_result = run_executor_agent(client, plan_result)
+            else:
+                executor_result = plan_result
 
             if "Critic Agent" in selected_agents:
                 status_container.write("🔍 **Critic Agent:** Reviewing outputs for accuracy and formatting quality...")
-                flashcards, quizzes = run_critic_agent(flashcards, quizzes)
+                final_output = run_critic_agent(client, executor_result)
+            else:
+                final_output = executor_result
 
-            status_container.update(label="✅ Agentic Workflow Completed Successfully!", state="complete", expanded=True)
+            status_container.update(label="✅ Agentic Workflow Completed Successfully!", state="complete", expanded=False)
             
-            # Save generated data to session state so it persists across UI interactions
-            st.session_state['flashcards'] = flashcards
-            st.session_state['quizzes'] = quizzes
+            # Save generated raw response to session state
+            st.session_state['final_output'] = final_output
 
         except Exception as e:
-            status_container.update(label="❌ Error during execution", state="error")
-            st.error(f"An error occurred: {e}")
+            st.error(f"An error occurred during API execution: {e}")
 
 # Display Results if Available in Session State
-if 'flashcards' in st.session_state and 'quizzes' in st.session_state:
+if 'final_output' in st.session_state:
     st.markdown("---")
-    tab1, tab2 = st.tabs(["📌 Generated Flashcards", "📝 Practice Quiz"])
-
-    with tab1:
-        st.subheader("Active-Recall Flashcards")
-        for idx, fc in enumerate(st.session_state['flashcards']):
-            with st.container():
-                st.markdown(f"""
-                <div class="card-box">
-                    <b>Flashcard {idx+1}</b><br><br>
-                    <b>Question:</b> What is the significance of <i>{fc['front']}</i>?<br><br>
-                    <details open>
-                        <summary style='color: #ff4b4b; cursor: pointer;'><b>Reveal Answer</b></summary>
-                        <p style='margin-top: 10px; white-space: pre-wrap; word-break: break-word;'>{fc['back']}</p>
-                    </details>
-                </div>
-                """, unsafe_allow_html=True)
-
-    with tab2:
-        st.subheader("Interactive Knowledge Check")
-        score = 0
-        for idx, q in enumerate(st.session_state['quizzes']):
-            st.markdown(f"**Question {idx+1}:** {q['question']}")
-            user_choice = st.radio(
-                f"Select your answer for Q{idx+1}:", 
-                q['options'], 
-                key=f"q_{idx}"
-            )
-            if user_choice == q['answer']:
-                st.success("Correct!")
-            else:
-                st.info(f"Correct Answer: {q['answer']}")
-            st.markdown("---")
+    st.subheader("🎯 Generated Study Suite (Gemini Output)")
+    
+    # Display the structured output returned by the agent pipeline
+    st.markdown(st.session_state['final_output'])
